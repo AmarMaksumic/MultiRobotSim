@@ -82,32 +82,35 @@ def build_icp_slam_map(log, resolution=0.02):
 
     return np.vstack(global_points)
 
-def rasterize_pointcloud(points, resolution=0.02):
-    min_coords = np.min(points, axis=0)
-    shifted_points = points - min_coords
-    grid_dim = np.ceil((np.max(shifted_points, axis=0)) / resolution).astype(int)
-    grid = np.zeros((grid_dim[1], grid_dim[0]), dtype=np.float32)
+def rasterize_pointcloud(points, resolution=0.02, map_size_m=10.0):
+    grid_dim = (int(map_size_m / resolution), int(map_size_m / resolution))
+    grid = np.zeros(grid_dim[::-1], dtype=np.float32)
 
-    for x, y in shifted_points:
-        gx = int(np.clip(x / resolution, 0, grid_dim[0] - 1))
-        gy = int(np.clip(y / resolution, 0, grid_dim[1] - 1))
-        grid[gy, gx] = 1.0
+    for x, y in points:
+        gx = int(x / resolution)
+        gy = int(y / resolution)
+        if 0 <= gx < grid_dim[0] and 0 <= gy < grid_dim[1]:
+            grid[gy, gx] = 1.0
 
     blurred = gaussian_filter(grid, sigma=1.0)
     binary_grid = (blurred > 0.2).astype(np.uint8)
-    return binary_grid, shifted_points
+    return binary_grid, points
 
 if __name__ == "__main__":
     # Run SLAM pipeline
+    resolution = 0.02
     log = load_log()
-    pointcloud = build_icp_slam_map(log, resolution=0.02)
-    grid, shifted_points = rasterize_pointcloud(pointcloud, resolution=0.02)
+    pointcloud = build_icp_slam_map(log, resolution=resolution)
+    grid, world_points = rasterize_pointcloud(pointcloud, resolution=resolution, map_size_m=10.0)
     np.save("slam_map.npy", grid)
 
     # Visualization
     plt.imshow(grid, cmap="gray", origin="lower")
-    plt.scatter(shifted_points[:, 0] / 0.02, shifted_points[:, 1] / 0.02, s=0.1, c='red')
-    plt.title("SLAM Map (ICP Estimated) with Point Overlay")
+    px = np.clip((world_points[:, 0] / resolution).astype(int), 0, grid.shape[1] - 1)
+    py = np.clip((world_points[:, 1] / resolution).astype(int), 0, grid.shape[0] - 1)
+    plt.scatter(px, py, s=0.1, c='red')
+    plt.title("SLAM Map (ICP Aligned) in Real-World Coordinates")
     plt.xlabel("X cells")
     plt.ylabel("Y cells")
     plt.show()
+

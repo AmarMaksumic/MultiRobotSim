@@ -208,8 +208,17 @@ def follow_path(pose, path):
     return pose, path
 
 # === Drawing ===
+def draw_grid_lines(surface, spacing, offset_x=0, offset_y=0, color=(100, 100, 100)):
+    width, height = surface.get_size()
+    for x in range(0, width, spacing):
+        pygame.draw.line(surface, color, (x, 0), (x, height))
+    for y in range(0, height, spacing):
+        pygame.draw.line(surface, color, (0, y), (width, y))
+
+# Updated draw_world function
 def draw_world(surf, pose):
     surf.fill((230, 230, 230))
+    draw_grid_lines(surf, RESOLUTION)
     draw_environment(surf, env)
     for hist_pose in robot_path_history:
         px, py = world_to_screen(hist_pose[0], hist_pose[1])
@@ -220,8 +229,10 @@ def draw_world(surf, pose):
     hy = ry - int(10 * math.sin(pose[2]))
     pygame.draw.line(surf, (0, 180, 0), (rx, ry), (hx, hy), 2)
 
+# Updated draw_slam function
 def draw_slam(surf, slam_map, path=None, goal=None):
     surf.fill((255, 255, 255))
+
     for y in range(map_h):
         for x in range(map_w):
             val = slam_map[y, x]
@@ -244,6 +255,7 @@ def draw_slam(surf, slam_map, path=None, goal=None):
     hx = sx + int(10 * math.cos(pose[2]))
     hy = sy - int(10 * math.sin(pose[2]))
     pygame.draw.line(surf, (0, 180, 0), (sx, sy), (hx, hy), 2)
+    draw_grid_lines(surf, spacing=int(1 / map_res), color=(200, 200, 200))
 
 # === Main loop ===
 running = True
