@@ -1,301 +1,499 @@
 # import pygame
 # import numpy as np
+# import math
 # import json
-# from environment import Environment, Object
-# from robot import Robot
+# from scipy.ndimage import gaussian_filter
+# from a_star_planner import a_star
 # from world import make_environment
+# from robot import Robot
 
-# # Constants
-# WINDOW_SIZE = 1000
+# # === Constants ===
+# WINDOW_W, WINDOW_H = 1000, 500
 # ENV_SIZE_M = 10
-# RESOLUTION = 100  # pixels per meter
-# DT = 0.1  # simulation time step (s)
-# LINEAR_VEL = 1.0  # m/s
-# ANGULAR_VEL = np.radians(90)  # rad/s
+# MAP_RES = 0.02
+# GRID_SIZE = int(ENV_SIZE_M / MAP_RES)
+# CELL_SIZE = 1
+# RESOLUTION = 50
+# DT = 0.001
 
-# def world_to_screen(x, y):
-#     return int(x * RESOLUTION), int(WINDOW_SIZE - y * RESOLUTION)
+# # === Pygame Setup ===
+# pygame.init()
+# screen = pygame.display.set_mode((WINDOW_W, WINDOW_H))
+# pygame.display.set_caption("Multi-Robot SLAM + A*")
+# clock = pygame.time.Clock()
+# half_w = WINDOW_W // 2
 
-# def draw_environment(screen, env):
+# # === Environment ===
+# env = make_environment(grid_size=ENV_SIZE_M, resolution=RESOLUTION)
+
+# # === Robots ===
+# robots = [
+#     Robot("R1", x=2, y=2, theta=0, environment=env),
+#     Robot("R2", x=4, y=2, theta=np.pi, environment=env),
+#     Robot("R3", x=5, y=5, theta=0, environment=env)
+# ]
+# robot_astar_counter = [0 for _ in robots]
+# robot_colors = [(0, 255, 0), (255, 165, 0), (0, 0, 255)]
+# robot_goals = [None for _ in robots]
+# robot_paths = [[] for _ in robots]
+# robot_autonomous = [False for _ in robots]
+# selected_robot_idx = 0  # Start with R1 selected
+
+# # === SLAM Map (shared) ===
+# slam_grid = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.float32)
+
+# # === SLAM Update ===
+# def update_slam(scan, pose, decay=0.999, strength=1.0, blur_sigma=2.0, threshold=0.03):
+#     global slam_grid
+#     slam_grid *= decay
+#     angles = np.linspace(0, 2 * np.pi, num=len(scan), endpoint=False)
+#     for i, d in enumerate(scan):
+#         if np.isnan(d) or d <= 0: continue
+#         angle = angles[i] + pose[2]
+#         x = pose[0] + d * np.cos(angle)
+#         y = pose[1] + d * np.sin(angle)
+#         gx = int(x / MAP_RES)
+#         gy = int(y / MAP_RES)
+#         if 0 <= gx < slam_grid.shape[1] and 0 <= gy < slam_grid.shape[0]:
+#             slam_grid[gy, gx] += strength
+#             slam_grid[gy, gx] = min(slam_grid[gy, gx], 1.0)
+#     blurred = gaussian_filter(slam_grid, sigma=blur_sigma)
+#     return (blurred > threshold).astype(np.uint8)
+
+# # === Utilities ===
+# def pose_to_cell(pose): return int(pose[1] / MAP_RES), int(pose[0] / MAP_RES)
+# def cell_to_screen(r, c): return c * CELL_SIZE, WINDOW_H - r * CELL_SIZE
+# def world_to_screen(x, y): return int(x * RESOLUTION), int(WINDOW_H - y * RESOLUTION)
+
+# def draw_grid_lines(surf, spacing, color=(180, 180, 180)):
+#     w, h = surf.get_size()
+#     for x in range(0, w, spacing):
+#         pygame.draw.line(surf, color, (x, 0), (x, h))
+#     for y in range(0, h, spacing):
+#         pygame.draw.line(surf, color, (0, y), (w, y))
+
+# def draw_world(surf, env, robots):
+#     surf.fill((240, 240, 240))
+#     draw_grid_lines(surf, RESOLUTION)
 #     for obj in env.get_objects():
 #         if obj.type == "circle":
 #             cx, cy = world_to_screen(*obj.position)
-#             radius = int((obj.size / 2) * RESOLUTION)
-#             pygame.draw.circle(screen, (200, 200, 200), (cx, cy), radius)
+#             r = int((obj.size / 2) * RESOLUTION)
+#             pygame.draw.circle(surf, (180,180,180), (cx, cy), r)
 #         elif obj.type == "rectangle":
 #             cx, cy = obj.position
 #             w, h = obj.size
+#             top_left = world_to_screen(cx - w/2, cy + h/2)
+#             pygame.draw.rect(surf, (180,180,180), pygame.Rect(top_left[0], top_left[1], int(w*RESOLUTION), int(h*RESOLUTION)))
+#     for i, robot in enumerate(robots):
+#         rx, ry = world_to_screen(robot.x, robot.y)
+#         pygame.draw.circle(surf, robot_colors[i], (rx, ry), 5)
+#         hx = rx + int(10 * math.cos(robot.theta))
+#         hy = ry - int(10 * math.sin(robot.theta))
+#         pygame.draw.line(surf, (0, 180, 0), (rx, ry), (hx, hy), 2)
+#         label = pygame.font.SysFont(None, 18).render(robot.name, True, robot_colors[i])
+#         surf.blit(label, (rx + 6, ry - 10))
 
-#             # Convert top-left corner to screen coordinates
-#             rect_x = cx - w / 2
-#             rect_y = cy + h / 2
-#             top_left = world_to_screen(rect_x, rect_y)
+#         if i == selected_robot_idx:
+#             pygame.draw.circle(surf, (255, 255, 0), (rx, ry + 10), 3)
 
-#             rect = pygame.Rect(
-#                 top_left[0],
-#                 top_left[1],
-#                 int(w * RESOLUTION),
-#                 int(h * RESOLUTION)
-#             )
-#             pygame.draw.rect(screen, (200, 200, 200), rect)
+# def draw_slam(surf, slam_map, paths, goals):
+#     surf.fill((255, 255, 255))
+#     for y in range(slam_map.shape[0]):
+#         for x in range(slam_map.shape[1]):
+#             if slam_map[y, x]:
+#                 rect = pygame.Rect(x, WINDOW_H - y, 1, 1)
+#                 pygame.draw.rect(surf, (0, 0, 0), rect)
+#     for i, path in enumerate(paths):
+#         for r, c in path:
+#             px, py = cell_to_screen(r, c)
+#             pygame.draw.rect(surf, robot_colors[i], (px, py, 2, 2))
+#     for i, goal in enumerate(goals):
+#         if goal:
+#             gx, gy = cell_to_screen(*goal)
+#             pygame.draw.circle(surf, robot_colors[i], (gx, gy), 4)
 
-# def draw_grid(screen, grid_size, resolution, color=(50, 50, 50)):
-#     for i in range(grid_size + 1):
-#         x = i * resolution
-#         pygame.draw.line(screen, color, (x, 0), (x, WINDOW_SIZE))  # vertical lines
-#         pygame.draw.line(screen, color, (0, x), (WINDOW_SIZE, x))  # horizontal lines
+# # === Main Loop ===
+# running = True
+# while running:
+#     for e in pygame.event.get():
+#         if e.type == pygame.QUIT:
+#             running = False
+#         elif e.type == pygame.MOUSEBUTTONDOWN:
+#             if e.button == 3:  # Right click: cycle selected robot
+#                 selected_robot_idx = (selected_robot_idx + 1) % len(robots)
+#                 print(f"Selected robot: {robots[selected_robot_idx].name}")
+#             elif e.button == 1:  # Left click: assign goal to selected robot
+#                 mx, my = pygame.mouse.get_pos()
+#                 if mx > half_w:
+#                     gx = (mx - half_w) // CELL_SIZE
+#                     gy = (WINDOW_H - my) // CELL_SIZE
+#                     goal = (gy, gx)
+#                     robot_goals[selected_robot_idx] = goal
+#                     robot_autonomous[selected_robot_idx] = True
 
+#     keys = pygame.key.get_pressed()
+#     if not any(robot_autonomous):
+#         dx = 0.05 if keys[pygame.K_d] else -0.05 if keys[pygame.K_a] else 0
+#         dy = 0.05 if keys[pygame.K_w] else -0.05 if keys[pygame.K_s] else 0
+#         dtheta = 0.1 if keys[pygame.K_q] else -0.1 if keys[pygame.K_e] else 0
+#         robots[0].move(dx, dy, dtheta)
 
-# def main():
-#     pygame.init()
-#     screen = pygame.display.set_mode((WINDOW_SIZE, WINDOW_SIZE))
-#     pygame.display.set_caption("LiDAR Robot Teleop")
-#     clock = pygame.time.Clock()
+#     # SLAM update from each robot
+#     for i, robot in enumerate(robots):
+#         if robot_astar_counter[i] % 4 == 0:
+#             scan = robot.update_scan()
+#             pose = robot.get_pose()
+#             update_slam(scan, pose)
 
-#     # Initialize environment and robot
-#     env = make_environment(grid_size=ENV_SIZE_M, resolution=RESOLUTION)
-#     robot = Robot("R1", x=5, y=5, theta=np.radians(0), environment=env)
+#     astar_map = update_slam(np.zeros(360), robots[0].get_pose())  # thresholded version
 
-#     log = []
-#     running = True
-#     while running:
-#         screen.fill((30, 30, 30))
+#     for i, robot in enumerate(robots):
+#         if robot_autonomous[i]:
+#             robot_astar_counter[i] += 1
+#             if robot_astar_counter[i] >= 20:
+#                 start = pose_to_cell(robot.get_pose())
+#                 goal = robot_goals[i]
+#                 obstacle_map = astar_map.copy()
+#                 for j, other in enumerate(robots):
+#                     if j == i: continue
+#                     r, c = pose_to_cell(other.get_pose())
+#                     if 0 <= r < GRID_SIZE and 0 <= c < GRID_SIZE:
+#                         obstacle_map[r, c] = 1
+#                 path = a_star(obstacle_map, start, goal, landmarks_dict={})
+#                 robot_astar_counter[i] = 0
+#                 if path and len(path) > 1:
+#                     robot_paths[i] = path
+#             if robot_paths[i]:
+#                 robots[i].move(
+#                     robot_paths[i][0][1] * MAP_RES - robot.x,
+#                     robot_paths[i][0][0] * MAP_RES - robot.y,
+#                     0
+#                 )
+#                 robot_paths[i] = robot_paths[i][1:]
+#             else:
+#                 robot_autonomous[i] = False
 
-#         keys = pygame.key.get_pressed()
-#         lv, av = 0.0, 0.0
+#     screen.fill((0, 0, 0))
+#     draw_world(screen.subsurface((0, 0, half_w, WINDOW_H)), env, robots)
+#     draw_slam(screen.subsurface((half_w, 0, half_w, WINDOW_H)), astar_map, robot_paths, robot_goals)
+#     pygame.display.flip()
+#     clock.tick(int(1 / DT))
 
-#         if keys[pygame.K_w]: lv += LINEAR_VEL
-#         if keys[pygame.K_s]: lv -= LINEAR_VEL
-#         if keys[pygame.K_q]: av += ANGULAR_VEL
-#         if keys[pygame.K_e]: av -= ANGULAR_VEL
+# pygame.quit()
 
-#         robot.move(lv, av, DT)
+# import pygame
+# import numpy as np
+# import math
+# from scipy.ndimage import gaussian_filter
+# from a_star_planner import a_star
+# from wcbs import wcbs_plan
+# from world import make_environment
+# from robot import Robot
+
+# # Constants
+# WINDOW_W, WINDOW_H = 1000, 500
+# ENV_SIZE_M = 5
+# MAP_RES = 0.01
+# GRID_SIZE = int(ENV_SIZE_M / MAP_RES)
+# CELL_SIZE = 1
+# RESOLUTION = 100
+# DT = 0.001
+
+# pygame.init()
+# screen = pygame.display.set_mode((WINDOW_W, WINDOW_H))
+# pygame.display.set_caption("WCBS Multi-Robot Sim")
+# clock = pygame.time.Clock()
+# half_w = WINDOW_W // 2
+
+# env = make_environment(grid_size=ENV_SIZE_M, resolution=RESOLUTION)
+# robots = [
+#     Robot("R1", x=1.0, y=1.0, theta=0, environment=env),
+#     Robot("R2", x=1.0, y=2.0, theta=0, environment=env)
+# ]
+# robot_colors = [(0, 255, 0), (255, 165, 0)]
+# robot_goals = [None for _ in robots]
+# robot_paths = [[] for _ in robots]
+# robot_autonomous = [False for _ in robots]
+# slam_grid = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.float32)
+# selected_robot_idx = 0
+
+# def update_slam(scan, pose, decay=0.999, strength=1.0, blur_sigma=2.0, threshold=0.03):
+#     global slam_grid
+#     slam_grid *= decay
+#     angles = np.linspace(0, 2*np.pi, num=len(scan), endpoint=False)
+#     for i, d in enumerate(scan):
+#         if np.isnan(d) or d <= 0: continue
+#         angle = angles[i] + pose[2]
+#         x = pose[0] + d * np.cos(angle)
+#         y = pose[1] + d * np.sin(angle)
+#         gx = int(x / MAP_RES)
+#         gy = int(y / MAP_RES)
+#         if 0 <= gx < slam_grid.shape[1] and 0 <= gy < slam_grid.shape[0]:
+#             slam_grid[gy, gx] += strength
+#             slam_grid[gy, gx] = min(slam_grid[gy, gx], 1.0)
+#     blurred = gaussian_filter(slam_grid, sigma=blur_sigma)
+#     return (blurred > threshold).astype(np.uint8)
+
+# def pose_to_cell(pose): return int(pose[1] / MAP_RES), int(pose[0] / MAP_RES)
+# def cell_to_screen(r, c): return c * CELL_SIZE, WINDOW_H - r * CELL_SIZE
+# def world_to_screen(x, y): return int(x * RESOLUTION), int(WINDOW_H - y * RESOLUTION)
+
+# def draw_world(surf, env, robots):
+#     surf.fill((240, 240, 240))
+#     for obj in env.get_objects():
+#         if obj.type == "circle":
+#             cx, cy = world_to_screen(*obj.position)
+#             r = int((obj.size / 2) * RESOLUTION)
+#             pygame.draw.circle(surf, (180,180,180), (cx, cy), r)
+#         elif obj.type == "rectangle":
+#             cx, cy = obj.position
+#             w, h = obj.size
+#             top_left = world_to_screen(cx - w/2, cy + h/2)
+#             pygame.draw.rect(surf, (180,180,180), pygame.Rect(top_left[0], top_left[1], int(w*RESOLUTION), int(h*RESOLUTION)))
+#     for i, robot in enumerate(robots):
+#         rx, ry = world_to_screen(robot.x, robot.y)
+#         pygame.draw.circle(surf, robot_colors[i], (rx, ry), 5)
+#         hx = rx + int(10 * math.cos(robot.theta))
+#         hy = ry - int(10 * math.sin(robot.theta))
+#         pygame.draw.line(surf, (0,180,0), (rx, ry), (hx, hy), 2)
+#         if i == selected_robot_idx:
+#             pygame.draw.circle(surf, (255, 255, 0), (rx, ry + 10), 3)
+
+# def draw_slam(surf, slam_map, paths, goals):
+#     surf.fill((255, 255, 255))
+#     for y in range(slam_map.shape[0]):
+#         for x in range(slam_map.shape[1]):
+#             if slam_map[y, x]:
+#                 rect = pygame.Rect(x, WINDOW_H - y, 1, 1)
+#                 pygame.draw.rect(surf, (0, 0, 0), rect)
+#     for i, path in enumerate(paths):
+#         for r, c in path:
+#             px, py = cell_to_screen(r, c)
+#             pygame.draw.rect(surf, robot_colors[i], (px, py, 2, 2))
+#     for i, goal in enumerate(goals):
+#         if goal:
+#             gx, gy = cell_to_screen(*goal)
+#             pygame.draw.circle(surf, robot_colors[i], (gx, gy), 4)
+
+# running = True
+# while running:
+#     for e in pygame.event.get():
+#         if e.type == pygame.QUIT:
+#             running = False
+#         elif e.type == pygame.MOUSEBUTTONDOWN:
+#             if e.button == 3:
+#                 selected_robot_idx = (selected_robot_idx + 1) % len(robots)
+#             elif e.button == 1:
+#                 mx, my = pygame.mouse.get_pos()
+#                 if mx > half_w:
+#                     gx = (mx - half_w) // CELL_SIZE
+#                     gy = (WINDOW_H - my) // CELL_SIZE
+#                     robot_goals[selected_robot_idx] = (gy, gx)
+#                     robot_autonomous[selected_robot_idx] = True
+
+#     for i, robot in enumerate(robots):
 #         scan = robot.update_scan()
 #         pose = robot.get_pose()
-#         hits = robot.get_lidar_hits()
+#         update_slam(scan, pose)
 
-#         # --- Drawing ---
-#         draw_grid(screen, ENV_SIZE_M, RESOLUTION)
-#         draw_environment(screen, env)
+#     astar_map = update_slam(np.zeros(360), robots[0].get_pose())
 
-#         # Draw robot
-#         rx, ry = world_to_screen(robot.x, robot.y)
-#         pygame.draw.circle(screen, (0, 255, 0), (rx, ry), 5)
+#     if any(robot_autonomous):
+#         starts = [pose_to_cell(r.get_pose()) for r in robots]
+#         paths = wcbs_plan(starts, robot_goals, astar_map, a_star)
+#         for i in range(len(robots)):
+#             robot_paths[i] = paths[i]
+#             robot_autonomous[i] = bool(paths[i])
 
-#         # Draw heading
-#         hx = rx + int(15 * np.cos(robot.theta))
-#         hy = ry - int(15 * np.sin(robot.theta))
-#         pygame.draw.line(screen, (0, 255, 255), (rx, ry), (hx, hy), 2)
+#     for i, robot in enumerate(robots):
+#         if robot_paths[i]:
+#             target = robot_paths[i].pop(0)
+#             robot.x = target[1] * MAP_RES
+#             robot.y = target[0] * MAP_RES
+#             if not robot_paths[i]:
+#                 robot_autonomous[i] = False
 
-#         # Draw LiDAR hits
-#         for (x, y) in hits:
-#             sx, sy = world_to_screen(x, y)
-#             pygame.draw.circle(screen, (255, 0, 0), (sx, sy), 2)
+#     screen.fill((0, 0, 0))
+#     draw_world(screen.subsurface((0, 0, half_w, WINDOW_H)), env, robots)
+#     draw_slam(screen.subsurface((half_w, 0, half_w, WINDOW_H)), astar_map, robot_paths, robot_goals)
+#     pygame.display.flip()
+#     clock.tick(int(1 / DT))
 
-#         # --- Logging ---
-#         log.append({
-#             "pose": [robot.x, robot.y, robot.theta],
-#             "scan": scan,
-#             "lidar_rotation": robot.lidar.rotation
-#         })
-
-#         pygame.display.flip()
-#         clock.tick(int(1 / DT))
-
-#         for event in pygame.event.get():
-#             if event.type == pygame.QUIT or (event.type == pygame.KEYDOWN and event.key == pygame.K_x):
-#                 running = False
-
-#     # Save log
-#     with open("log.json", "w") as f:
-#         json.dump(log, f, indent=2)
-#     print("Log saved to log.json")
-
-#     pygame.quit()
-
-# if __name__ == "__main__":
-#     main()
-
-
-
+# pygame.quit()
 import pygame
 import numpy as np
 import math
-import json
-from a_star_planner import a_star, load_map
+import os
+from scipy.ndimage import gaussian_filter
+from a_star_planner import a_star, build_reservations
+from wcbs import wcbs_plan
 from world import make_environment
+from robot import Robot
 
-# === Setup ===
+# === Constants ===
+WINDOW_W, WINDOW_H = 1000, 500
+ENV_SIZE_M = 5
+MAP_RES = 0.01
+GRID_SIZE = int(ENV_SIZE_M / MAP_RES)
+CELL_SIZE = 1
+RESOLUTION = 100
+DT = 0.001
+
+# === Frame saving directory ===
+FRAME_DIR = "pygame_frames"
+os.makedirs(FRAME_DIR, exist_ok=True)
+
+# === Pygame Setup ===
 pygame.init()
-win_w, win_h = 1000, 500
-cell_size = 1
-screen = pygame.display.set_mode((win_w, win_h))
-pygame.display.set_caption("Teleop World + SLAM Map Autonav")
+screen = pygame.display.set_mode((WINDOW_W, WINDOW_H))
+pygame.display.set_caption("Multi-Robot SLAM + WCBS")
 clock = pygame.time.Clock()
-
-# === SLAM Map ===
-slam_map = load_map("slam_map.npy", inflate_radius=5)
-map_h, map_w = slam_map.shape
-map_res = 0.02
-half_w = win_w // 2
+half_w = WINDOW_W // 2
 
 # === Environment ===
-ENV_SIZE_M = 10
-RESOLUTION = 50
 env = make_environment(grid_size=ENV_SIZE_M, resolution=RESOLUTION)
 
-# === Robot Pose ===
-with open("log.json", "r") as f:
-    pose_data = json.load(f)
-pose = pose_data[-1]["pose"]
-path = []
-goal = None
-autonomous = False
-robot_path_history = []
+# === Robots ===
+robots = [
+    Robot("R1", x=2, y=2, theta=0, environment=env),
+    Robot("R2", x=2, y=3, theta=np.pi, environment=env),
+    Robot("R3", x=3, y=3, theta=np.pi, environment=env),
+    Robot("R4", x=3, y=4, theta=np.pi, environment=env),
+    Robot("R5", x=4, y=3, theta=np.pi, environment=env),
+    Robot("R6", x=2.5, y=2.5, theta=np.pi, environment=env)
+]
+robot_colors = [(0, 255, 0), (255, 165, 0), (0, 0, 255), (255, 0, 255), (0, 255, 255), (255, 0, 0)]
+robot_goals = [None for _ in robots]
+robot_paths = [[] for _ in robots]
+robot_autonomous = [False for _ in robots]
+selected_robot_idx = 0
 
-# === Utilities ===
-def pose_to_cell(x, y):
-    return int(y / map_res), int(x / map_res)
+# === SLAM Map (shared) ===
+slam_grid = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.float32)
 
-def cell_to_screen(row, col, offset=0, flip_y=False):
-    sx = col * cell_size + offset
-    sy = row * cell_size
-    if flip_y:
-        sy = win_h - sy
-    return sx, sy
+def update_slam(scan, pose, decay=0.999, strength=1.0, blur_sigma=2.0, threshold=0.03):
+    global slam_grid
+    slam_grid *= decay
+    angles = np.linspace(0, 2 * np.pi, num=len(scan), endpoint=False)
+    for i, d in enumerate(scan):
+        if np.isnan(d) or d <= 0: continue
+        angle = angles[i] + pose[2]
+        x = pose[0] + d * np.cos(angle)
+        y = pose[1] + d * np.sin(angle)
+        gx = int(x / MAP_RES)
+        gy = int(y / MAP_RES)
+        if 0 <= gx < slam_grid.shape[1] and 0 <= gy < slam_grid.shape[0]:
+            slam_grid[gy, gx] += strength
+            slam_grid[gy, gx] = min(slam_grid[gy, gx], 1.0)
+    blurred = gaussian_filter(slam_grid, sigma=blur_sigma)
+    return (blurred > threshold).astype(np.uint8)
 
-def world_to_screen(x, y):
-    return int(x * RESOLUTION), int(win_h - y * RESOLUTION)
+def pose_to_cell(pose): return int(pose[1] / MAP_RES), int(pose[0] / MAP_RES)
+def cell_to_screen(r, c): return c * CELL_SIZE, WINDOW_H - r * CELL_SIZE
+def world_to_screen(x, y): return int(x * RESOLUTION), int(WINDOW_H - y * RESOLUTION)
 
-def draw_environment(screen, env):
+def draw_grid_lines(surf, spacing, color=(180, 180, 180)):
+    w, h = surf.get_size()
+    for x in range(0, w, spacing):
+        pygame.draw.line(surf, color, (x, 0), (x, h))
+    for y in range(0, h, spacing):
+        pygame.draw.line(surf, color, (0, y), (w, y))
+
+def draw_world(surf, env, robots):
+    surf.fill((240, 240, 240))
+    draw_grid_lines(surf, RESOLUTION)
     for obj in env.get_objects():
         if obj.type == "circle":
             cx, cy = world_to_screen(*obj.position)
-            radius = int((obj.size / 2) * RESOLUTION)
-            pygame.draw.circle(screen, (180, 180, 180), (cx, cy), radius)
+            r = int((obj.size / 2) * RESOLUTION)
+            pygame.draw.circle(surf, (180,180,180), (cx, cy), r)
         elif obj.type == "rectangle":
             cx, cy = obj.position
             w, h = obj.size
-            top_left = world_to_screen(cx - w / 2, cy + h / 2)
-            rect = pygame.Rect(
-                top_left[0], top_left[1],
-                int(w * RESOLUTION), int(h * RESOLUTION)
-            )
-            pygame.draw.rect(screen, (180, 180, 180), rect)
+            top_left = world_to_screen(cx - w/2, cy + h/2)
+            pygame.draw.rect(surf, (180,180,180), pygame.Rect(top_left[0], top_left[1], int(w*RESOLUTION), int(h*RESOLUTION)))
+    for i, robot in enumerate(robots):
+        rx, ry = world_to_screen(robot.x, robot.y)
+        pygame.draw.circle(surf, robot_colors[i], (rx, ry), 5)
+        hx = rx + int(10 * math.cos(robot.theta))
+        hy = ry - int(10 * math.sin(robot.theta))
+        pygame.draw.line(surf, (0, 180, 0), (rx, ry), (hx, hy), 2)
+        label = pygame.font.SysFont(None, 18).render(robot.name, True, robot_colors[i])
+        surf.blit(label, (rx + 6, ry - 10))
+        if i == selected_robot_idx:
+            pygame.draw.circle(surf, (255, 255, 0), (rx, ry + 10), 3)
 
-def follow_path(pose, path):
-    if not path:
-        return pose, path
-
-    target_row, target_col = path[0]
-    target_x = target_col * map_res
-    target_y = target_row * map_res
-
-    dx = target_x - pose[0]
-    dy = target_y - pose[1]
-    dist = np.hypot(dx, dy)
-
-    if dist < 0.05:
-        path.pop(0)
-    else:
-        step_size = min(0.05, dist)
-        dir_x = dx / dist
-        dir_y = dy / dist
-        pose[0] += step_size * dir_x
-        pose[1] += step_size * dir_y
-        pose[2] = math.atan2(dy, dx)
-
-    return pose, path
-
-# === Drawing ===
-def draw_grid_lines(surface, spacing, offset_x=0, offset_y=0, color=(100, 100, 100)):
-    width, height = surface.get_size()
-    for x in range(0, width, spacing):
-        pygame.draw.line(surface, color, (x, 0), (x, height))
-    for y in range(0, height, spacing):
-        pygame.draw.line(surface, color, (0, y), (width, y))
-
-# Updated draw_world function
-def draw_world(surf, pose):
-    surf.fill((230, 230, 230))
-    draw_grid_lines(surf, RESOLUTION)
-    draw_environment(surf, env)
-    for hist_pose in robot_path_history:
-        px, py = world_to_screen(hist_pose[0], hist_pose[1])
-        pygame.draw.circle(surf, (173, 216, 230), (px, py), 2)
-    rx, ry = world_to_screen(pose[0], pose[1])
-    pygame.draw.circle(surf, (0, 255, 0), (rx, ry), 6)
-    hx = rx + int(10 * math.cos(pose[2]))
-    hy = ry - int(10 * math.sin(pose[2]))
-    pygame.draw.line(surf, (0, 180, 0), (rx, ry), (hx, hy), 2)
-
-# Updated draw_slam function
-def draw_slam(surf, slam_map, path=None, goal=None):
+def draw_slam(surf, slam_map, paths, goals):
     surf.fill((255, 255, 255))
+    for y in range(slam_map.shape[0]):
+        for x in range(slam_map.shape[1]):
+            if slam_map[y, x]:
+                rect = pygame.Rect(x, WINDOW_H - y, 1, 1)
+                pygame.draw.rect(surf, (0, 0, 0), rect)
+    for i, path in enumerate(paths):
+        for r, c in path:
+            px, py = cell_to_screen(r, c)
+            pygame.draw.rect(surf, robot_colors[i], (px, py, 2, 2))
+    for i, goal in enumerate(goals):
+        if goal:
+            gx, gy = cell_to_screen(*goal)
+            pygame.draw.circle(surf, robot_colors[i], (gx, gy), 4)
 
-    for y in range(map_h):
-        for x in range(map_w):
-            val = slam_map[y, x]
-            color = (0, 0, 0) if val else (255, 255, 255)
-            rect = pygame.Rect(x * cell_size, win_h - y * cell_size, cell_size, cell_size)
-            pygame.draw.rect(surf, color, rect)
-
-    if path:
-        for p in path:
-            px, py = cell_to_screen(*p, offset=half_w, flip_y=True)
-            pygame.draw.rect(surf, (0, 255, 255), (px, py, cell_size, cell_size))
-
-    if goal:
-        gx, gy = cell_to_screen(*goal, offset=half_w, flip_y=True)
-        pygame.draw.circle(surf, (255, 0, 0), (gx, gy), 5)
-
-    rx, ry = pose_to_cell(pose[0], pose[1])
-    sx, sy = cell_to_screen(rx, ry, offset=half_w, flip_y=True)
-    pygame.draw.circle(surf, (0, 255, 0), (sx, sy), 4)
-    hx = sx + int(10 * math.cos(pose[2]))
-    hy = sy - int(10 * math.sin(pose[2]))
-    pygame.draw.line(surf, (0, 180, 0), (sx, sy), (hx, hy), 2)
-    draw_grid_lines(surf, spacing=int(1 / map_res), color=(200, 200, 200))
-
-# === Main loop ===
+# === Main Loop ===
 running = True
+step_counter = 0
 while running:
     for e in pygame.event.get():
         if e.type == pygame.QUIT:
             running = False
-        elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
-            mx, my = pygame.mouse.get_pos()
-            if mx >= half_w:
-                gx = (mx - half_w) // cell_size
-                gy = (win_h - my) // cell_size
-                goal = (gy, gx)
-                start = pose_to_cell(pose[0], pose[1])
-                path = a_star(slam_map, start, goal, landmarks_dict={})
-                autonomous = bool(path)
-                print(f"Planned path to {goal} from {start}")
+        elif e.type == pygame.MOUSEBUTTONDOWN:
+            if e.button == 3:
+                selected_robot_idx = (selected_robot_idx + 1) % len(robots)
+                print(f"Selected robot: {robots[selected_robot_idx].name}")
+            elif e.button == 1:
+                mx, my = pygame.mouse.get_pos()
+                if mx > half_w:
+                    gx = (mx - half_w) // CELL_SIZE
+                    gy = (WINDOW_H - my) // CELL_SIZE
+                    goal = (gy, gx)
+                    robot_goals[selected_robot_idx] = goal
+                    robot_autonomous[selected_robot_idx] = True
 
     keys = pygame.key.get_pressed()
-    if not autonomous:
-        if keys[pygame.K_w]:
-            pose[1] += 0.05
-        if keys[pygame.K_s]:
-            pose[1] -= 0.05
-        if keys[pygame.K_a]:
-            pose[0] -= 0.05
-        if keys[pygame.K_d]:
-            pose[0] += 0.05
-    else:
-        pose, path = follow_path(pose, path)
-        if not path:
-            autonomous = False
-            print("Reached goal.")
+    if not any(robot_autonomous):
+        dx = 0.05 if keys[pygame.K_d] else -0.05 if keys[pygame.K_a] else 0
+        dy = 0.05 if keys[pygame.K_w] else -0.05 if keys[pygame.K_s] else 0
+        dtheta = 0.1 if keys[pygame.K_q] else -0.1 if keys[pygame.K_e] else 0
+        robots[0].move(dx, dy, dtheta)
 
-    robot_path_history.append((pose[0], pose[1]))
+    for robot in robots:
+        scan = robot.update_scan()
+        update_slam(scan, robot.get_pose())
+    astar_map = update_slam(np.zeros(360), robots[0].get_pose())
+
+    if step_counter % 10 == 0:
+        starts = [pose_to_cell(r.get_pose()) for r in robots]
+        if all(g is not None for g in robot_goals):
+            robot_paths = wcbs_plan(starts, robot_goals, astar_map, a_star)
+
+    for i, robot in enumerate(robots):
+        if robot_paths and robot_paths[i]:
+            next_cell = robot_paths[i][0]
+            goal_x, goal_y = next_cell[1] * MAP_RES, next_cell[0] * MAP_RES
+            robot.move(goal_x - robot.x, goal_y - robot.y, 0)
+            robot_paths[i] = robot_paths[i][1:]
 
     screen.fill((0, 0, 0))
-    draw_world(screen.subsurface((0, 0, half_w, win_h)), pose)
-    draw_slam(screen.subsurface((half_w, 0, half_w, win_h)), slam_map, path, goal)
+    draw_world(screen.subsurface((0, 0, half_w, WINDOW_H)), env, robots)
+    draw_slam(screen.subsurface((half_w, 0, half_w, WINDOW_H)), astar_map, robot_paths, robot_goals)
     pygame.display.flip()
-    clock.tick(30)
+
+    # === Save frame ===
+    frame_path = os.path.join(FRAME_DIR, f"frame_{step_counter:04d}.png")
+    pygame.image.save(screen, frame_path)
+
+    clock.tick(int(1 / DT))
+    step_counter += 1
 
 pygame.quit()

@@ -21,15 +21,13 @@ class Robot:
 
         self.scan_data = []
 
-    def move(self, linear_velocity, angular_velocity, dt):
-        # Update position and heading using differential drive model
-        self.theta += angular_velocity * dt
-        self.theta %= 2 * np.pi  # normalize angle
+    # use holonomic motion model to move the robot
+    def move(self, dx, dy, dtheta):
+        self.x += dx
+        self.y += dy
+        self.theta += dtheta
 
-        self.x += linear_velocity * np.cos(self.theta) * dt
-        self.y += linear_velocity * np.sin(self.theta) * dt
-
-        # Update lidar pose
+        # Update LIDAR position and rotation
         self.lidar.set_location(self.x, self.y)
         self.lidar.set_rotation(np.degrees(self.theta))
 
